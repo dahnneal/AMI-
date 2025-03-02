@@ -1,70 +1,168 @@
-from langchain.schema import HumanMessage, SystemMessage
-from langchain.memory import ConversationBufferMemory
-from langchain_groq import ChatGroq
-from dotenv import load_dotenv
 import streamlit as st
+import firebase_admin
+from firebase_admin import credentials, firestore
 import os
+import uuid
+from langchain_groq import ChatGroq
+from langchain.schema import SystemMessage, HumanMessage
+from dotenv import load_dotenv
+import logging
+
+# Attempt to import streamlit_webrtc and streamlit_audio_recorder
+try:
+    from streamlit_webrtc import webrtc_streamer
+    webrtc_available = True
+except ImportError:
+    webrtc_available = False
+
+try:
+    from streamlit_audio_recorder import st_audio_recorder
+    audio_available = True
+except ImportError:
+    audio_available = False
 
 # Load environment variables
 load_dotenv()
+
+# Initialize logging
+logging.basicConfig(level=logging.INFO)
+
+firebase_cred_path = os.getenv("FIREBASE_CREDENTIALS_PATH")
+if not firebase_cred_path or not os.path.exists(firebase_cred_path):
+    st.error("⚠️ Firebase credentials not found. Please check your environment variable.")
+    st.stop()
+
+# Initialize Firebase
+if not firebase_admin._apps:
+    cred = credentials.Certificate(firebase_cred_path)
+    firebase_admin.initialize_app(cred)
+db = firestore.client()
+
+# Initialize AI Model
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+if not GROQ_API_KEY:
+    st.error("⚠️ Groq API key missing. Set it in your environment variables.")
+    st.stop()
+chat_model = ChatGroq(groq_api_key=GROQ_API_KEY, model_name="mixtral-8x7b-32768")
 
-# Initialize Chat Model
-chat_model = ChatGroq(
-    groq_api_key=GROQ_API_KEY,
-    model_name="mixtral-8x7b-32768"
-)
+# Session Initialization
+if "user_id" not in st.session_state:
+    st.session_state.user_id = str(uuid.uuid4())
 
-# AI Character Options
-ai_characters = {
-    "wise_scholar": {"name": "Professor Wole", "description": "A wise AI with deep insights.", "icon": "🧠"},
-    "friendly_companion": {"name": "BFF", "description": "A warm and friendly AI that loves to chat.", "icon": "😊"},
-    "mysterious_mentor": {"name": "GreatOne", "description": "A cryptic AI that speaks in riddles.", "icon": "🔮"},
-}
+if "user_name" not in st.session_state:
+    st.session_state.user_name = ""
 
-# Streamlit UI Config
-st.set_page_config(page_title="AI Character Chat", page_icon="🤖")
-st.title("🎭 AI Character Chatbot")
-st.markdown("**Select an AI character and start chatting!**")
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
 
-# Select AI Character
-character_choice = st.selectbox("Choose your AI character:", list(ai_characters.keys()))
-selected_ai = ai_characters[character_choice]
-st.markdown(f"### {selected_ai['icon']} {selected_ai['name']} - {selected_ai['description']}")
+# Load chat history from Firestore
+def load_chat_history():
+    user_ref = db.collection("users").document(st.session_state.user_id)
+    user_data = user_ref.get()
+    if user_data.exists:
+        st.session_state.chat_history = user_data.to_dict().get("chat_history", [])
+    else:
+        st.session_state.chat_history = []
 
-# Initialize Memory
-if "memory" not in st.session_state:
-    st.session_state.memory = ConversationBufferMemory()
+# Sidebar for AI Character Selection
+st.sidebar.title("🤖 AI Character Selection")
+character_choice = st.sidebar.selectbox("Choose your AI character:", ["Papilo", "WakandaBot", "Zulu Sage", "Mama Africa", "Custom"])
 
-# Display Chat History
-st.subheader("💬 Chat History")
-for message in st.session_state.memory.chat_memory.messages:
-    with st.chat_message("user" if isinstance(message, HumanMessage) else "assistant"):
-        st.markdown(f"{selected_ai['icon']} **{selected_ai['name'] if isinstance(message, SystemMessage) else 'You'}:** {message.content}")
+if character_choice == "Custom":
+    custom_name = st.sidebar.text_input("Enter your custom AI character name:")
+    custom_description = st.sidebar.text_area("Describe your AI character:")
+    if st.sidebar.button("Set Custom AI"):
+        if custom_name and custom_description:
+            character_choice = custom_name
+        else:
+            st.warning("⚠️ Please enter both name and description for your custom AI!")
 
-# User Input with Enter Key
+st.title(f"🌟 {character_choice} - Your AI Companion")
+
+# User Authentication
+if not st.session_state.user_name:
+    user_name = st.text_input("Enter your name:")
+    if user_name:
+        st.session_state.user_name = user_name
+        st.success(f"Welcome, {st.session_state.user_name}!")
+        load_chat_history()
+    else:
+        st.stop()
+
+# Chat Input & Response Handling
+def update_chat_history(role, message):
+    st.session_state.chat_history.append({"role": role, "message": message})
+    db.collection("users").document(st.session_state.user_id).set({"chat_history": st.session_state.chat_history}, merge=True)
+
+st.write("### Chat History")
+for chat in st.session_state.chat_history:
+    with st.chat_message(chat["role"]):
+        st.markdown(chat["message"])
+
+if not st.session_state.chat_history:
+    greeting = f"Hello {st.session_state.user_name}! It's nice to meet you. How can I assist you today?"
+    update_chat_history("assistant", f"🤖 {character_choice}: {greeting}")
+
 user_input = st.chat_input("Type your message...")
 if user_input:
-    # AI Response
-    messages = [
-        SystemMessage(content=f"You are {selected_ai['name']}, {selected_ai['description']}"),
-        HumanMessage(content=user_input),
-    ]
-    response = chat_model.invoke(messages)
-    
-    # Store conversation
-    st.session_state.memory.chat_memory.add_user_message(user_input)
-    st.session_state.memory.chat_memory.add_ai_message(response.content)
-
-    # Display User Message
     with st.chat_message("user"):
-        st.markdown(f"👤 **You:** {user_input}")
+        st.markdown(f"👤 {st.session_state.user_name}: {user_input}")
+    update_chat_history("user", f"👤 {st.session_state.user_name}: {user_input}")
 
-    # Display AI Response
+    response = chat_model.invoke([
+        SystemMessage(content=f"{character_choice} responding"),
+        HumanMessage(content=f"{st.session_state.user_name}: {user_input}")
+    ])
+    
     with st.chat_message("assistant"):
-        st.markdown(f"{selected_ai['icon']} **{selected_ai['name']}:** {response.content}")
+        st.markdown(f"🤖 {character_choice}: {response.content}")
+    update_chat_history("assistant", f"🤖 {character_choice}: {response.content}")
 
-# Clear Chat Button
-if st.button("🗑️ Clear Chat"):
-    st.session_state.memory.clear()
-    st.experimental_rerun()
+# Video & Audio Chat Feature (Side Panel)
+st.sidebar.title("🎥 Voice & Video Chat")
+st.sidebar.write("Start a conversation with AI.")
+if webrtc_available:
+    with st.sidebar:
+        webrtc_streamer(key="video_chat")
+if audio_available:
+    with st.sidebar:
+        st_audio_recorder("🎤 Record Voice Message")
+
+# UI Enhancements
+st.markdown(
+    """
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap');
+        body, .stApp {
+            background-color: #121212 !important;
+            color: #ffffff !important;
+            font-family: 'Inter', sans-serif;
+        }
+        .stChatMessage {
+            padding: 8px !important;
+            margin-bottom: 5px !important;
+            color: white !important;
+        }
+        .stTextInput input {
+            border-radius: 10px;
+            padding: 10px;
+            width: 100%;
+            font-size: 16px;
+            color: white !important;
+            background-color: #333333 !important;
+        }
+        .stButton button {
+            background-color: #4CAF50;
+            color: white;
+            padding: 10px 20px;
+            cursor: pointer;
+            border-radius: 5px;
+            font-size: 16px;
+        }
+        .stButton button:hover {
+            background-color: #45a049;
+        }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
