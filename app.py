@@ -27,14 +27,19 @@ load_dotenv()
 # Initialize logging
 logging.basicConfig(level=logging.INFO)
 
-firebase_cred_path = os.getenv("FIREBASE_CREDENTIALS_PATH")
-if not firebase_cred_path or not os.path.exists(firebase_cred_path):
+import json
+
+firebase_cred_json = os.getenv("FIREBASE_CREDENTIALS")
+if not firebase_cred_json:
     st.error("⚠️ Firebase credentials not found. Please check your environment variable.")
     st.stop()
 
-# Initialize Firebase
+# Load Firebase credentials from the JSON string
+firebase_cred = json.loads(firebase_cred_json)
+
+# Initialize Firebase with the loaded credentials
 if not firebase_admin._apps:
-    cred = credentials.Certificate(firebase_cred_path)
+    cred = credentials.Certificate(firebase_cred)
     firebase_admin.initialize_app(cred)
 db = firestore.client()
 
